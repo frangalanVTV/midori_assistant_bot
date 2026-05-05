@@ -7,37 +7,28 @@
  */
 
 // ─────────────────────────────────────────────────────────────────────────────
-// Hardcoded data  (v2: replace with calls to your admin API)
+// Dynamic project data — fetched from rendiciones API with a 5-min in-memory cache
 // ─────────────────────────────────────────────────────────────────────────────
 
-const PROJECTS = [
-  { id: "artverse", name: "Artverse" },
-  { id: "new_york", name: "New York" },
-  { id: "maurice",  name: "Maurice"  },
-]
+let _projectsCache = null
+let _projectsCacheTs = 0
+const PROJECTS_CACHE_TTL = 5 * 60 * 1000
 
-const BUDGET_ITEMS = {
-  artverse: [
-    { id: "art_materials", name: "Art Materials" },
-    { id: "studio_rent",   name: "Studio Rent"   },
-    { id: "marketing",     name: "Marketing"     },
-    { id: "equipment",     name: "Equipment"     },
-    { id: "travel",        name: "Travel"        },
-  ],
-  new_york: [
-    { id: "accommodation", name: "Accommodation" },
-    { id: "transport",     name: "Transport"     },
-    { id: "meals",         name: "Meals"         },
-    { id: "venue",         name: "Venue"         },
-    { id: "supplies",      name: "Supplies"      },
-  ],
-  maurice: [
-    { id: "production",      name: "Production"     },
-    { id: "post_production", name: "Post-Production" },
-    { id: "crew",            name: "Crew"            },
-    { id: "gear_rental",     name: "Gear Rental"     },
-    { id: "catering",        name: "Catering"        },
-  ],
+async function getProjectsData() {
+  const now = Date.now()
+  if (_projectsCache && now - _projectsCacheTs < PROJECTS_CACHE_TTL) {
+    return _projectsCache
+  }
+  const url = process.env.RENDICIONES_API_URL
+  const key = process.env.MIDORI_API_KEY
+  if (!url || !key) throw new Error("Missing env vars: RENDICIONES_API_URL or MIDORI_API_KEY")
+  const res = await fetch(`${url}/api/bot/projects`, {
+    headers: { "x-api-key": key },
+  })
+  if (!res.ok) throw new Error(`Projects API error: ${res.status}`)
+  _projectsCache = await res.json()
+  _projectsCacheTs = now
+  return _projectsCache
 }
 
 const PAYMENT_METHODS = [
@@ -185,15 +176,18 @@ async function askForAmount(chatId) {
 }
 
 async function askForProject(chatId) {
+  const projects = await getProjectsData()
   const keyboard = inlineKeyboard(
-    PROJECTS.map((p) => ({ name: p.name, callbackData: `proj_${p.id}` })),
+    projects.map((p) => ({ name: p.name, callbackData: `proj_${p.id}` })),
     1  // one project per row so names never wrap
   )
   await sendMessage(chatId, "📁 Which project is this expense for?", keyboard)
 }
 
 async function askForItem(chatId, projectId) {
-  const items = BUDGET_ITEMS[projectId] ?? []
+  const projects = await getProjectsData()
+  const project = projects.find((p) => p.id === projectId)
+  const items = project?.items ?? []
   const keyboard = inlineKeyboard(
     items.map((i) => ({ name: i.name, callbackData: `item_${i.id}` }))
   )
@@ -340,7 +334,8 @@ async function handleCallbackQuery(chatId, userId, callbackQueryId, data, sessio
   // ── Project selection ──────────────────────────────────────────────────────
   if (data.startsWith("proj_") && state === "waiting_for_project") {
     const projectId = data.slice(5)
-    const project   = PROJECTS.find((p) => p.id === projectId)
+    const projects  = await getProjectsData()
+    const project   = projects.find((p) => p.id === projectId)
     if (!project) return
 
     expense.projectId   = project.id
@@ -352,9 +347,10 @@ async function handleCallbackQuery(chatId, userId, callbackQueryId, data, sessio
 
   // ── Budget item selection ──────────────────────────────────────────────────
   if (data.startsWith("item_") && state === "waiting_for_item") {
-    const itemId = data.slice(5)
-    const items  = BUDGET_ITEMS[expense.projectId] ?? []
-    const item   = items.find((i) => i.id === itemId)
+    const itemId   = data.slice(5)
+    const projects = await getProjectsData()
+    const project  = projects.find((p) => p.id === expense.projectId)
+    const item     = (project?.items ?? []).find((i) => i.id === itemId)
     if (!item) return
 
     expense.itemId   = item.id
@@ -381,21 +377,30 @@ async function handleCallbackQuery(chatId, userId, callbackQueryId, data, sessio
   if (state === "waiting_for_confirmation") {
     if (data === "conf_yes") {
       const final = { ...expense }
-      // Redact sensitive IDs from the log
-      console.log("[expense] saved:", {
-        ...final,
-        userId:        "[redacted]",
-        receiptFileId: "[redacted]",
+
+      const res = await fetch(`${process.env.RENDICIONES_API_URL}/api/bot/expenses`, {
+        method:  "POST",
+        headers: { "Content-Type": "application/json", "x-api-key": process.env.MIDORI_API_KEY },
+        body: JSON.stringify({
+          amount_cents:    Math.round(final.amount * 100),
+          currency:        final.currency || "EUR",
+          description:     final.description || final.merchant || "Telegram expense",
+          project_id:      final.projectId,
+          project_item_id: final.itemId || null,
+          paid_by:         final.userName,
+          cash_source:     final.paymentMethodName,
+          expense_date:    final.date || new Date().toISOString().split("T")[0],
+        }),
       })
+
+      if (!res.ok) {
+        const err = await res.json().catch(() => ({}))
+        console.error("[expense] API error:", res.status, err.error)
+        await sendMessage(chatId, "⚠️ Could not save expense. Please try again.")
+        return
+      }
+
       deleteSession(chatId, userId)
-
-      // TODO v2: forward to admin API
-      // await fetch(`${process.env.ADMIN_API_URL}/expenses`, {
-      //   method:  "POST",
-      //   headers: { "Content-Type": "application/json", "x-api-key": process.env.ADMIN_API_KEY },
-      //   body:    JSON.stringify(final),
-      // })
-
       await sendMessage(chatId, "✅ Expense saved!")
       return
     }
