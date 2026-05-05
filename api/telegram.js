@@ -39,7 +39,13 @@ if (!claudeResponse.ok) {
   console.error("Claude error:", data)
 }
 
-const reply = data.content?.[0]?.text || "Error con Claude"
+let reply = "Error con Claude"
+
+if (!claudeResponse.ok) {
+  reply = JSON.stringify(data)
+} else {
+  reply = data.content?.[0]?.text || "Sin respuesta"
+}
 
     await fetch(`https://api.telegram.org/bot${process.env.TELEGRAM_TOKEN}/sendMessage`, {
       method: "POST",
