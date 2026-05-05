@@ -22,7 +22,7 @@ async function getProjectsData() {
   const url = process.env.RENDICIONES_API_URL
   const key = process.env.MIDORI_API_KEY
   if (!url || !key) throw new Error("Missing env vars: RENDICIONES_API_URL or MIDORI_API_KEY")
-  const res = await fetch(`${url}/api/bot/projects`, {
+  const res = await fetch(`${url}/api/projects`, {
     headers: { "x-api-key": key },
   })
   if (!res.ok) throw new Error(`Projects API error: ${res.status}`)
@@ -383,7 +383,7 @@ async function handleCallbackQuery(chatId, userId, callbackQueryId, data, sessio
     if (data === "conf_yes") {
       const final = { ...expense }
 
-      const res = await fetch(`${process.env.RENDICIONES_API_URL}/api/bot/expenses`, {
+      const res = await fetch(`${process.env.RENDICIONES_API_URL}/api/expenses/create`, {
         method:  "POST",
         headers: { "Content-Type": "application/json", "x-api-key": process.env.MIDORI_API_KEY },
         body: JSON.stringify({
