@@ -163,6 +163,57 @@ function runOcr(/* fileId */) {
 }
 
 // ─────────────────────────────────────────────────────────────────────────────
+// Receipt upload — downloads from Telegram, uploads to Vercel Blob via
+// the rendiciones /api/upload endpoint. Returns the public URL or null.
+// Never throws — a failed upload does not block the expense flow.
+// ─────────────────────────────────────────────────────────────────────────────
+
+async function uploadReceipt(fileId) {
+  try {
+    // 1. Resolve Telegram file path
+    const fileRes = await fetch(tgUrl(`getFile?file_id=${encodeURIComponent(fileId)}`))
+    if (!fileRes.ok) {
+      console.error("[upload] getFile failed:", fileRes.status)
+      return null
+    }
+    const fileData = await fileRes.json()
+    if (!fileData.ok || !fileData.result?.file_path) {
+      console.error("[upload] getFile: missing file_path")
+      return null
+    }
+
+    // 2. Download from Telegram (token stays out of logs)
+    const token = process.env.TELEGRAM_BOT_TOKEN
+    const downloadUrl = `https://api.telegram.org/file/bot${token}/${fileData.result.file_path}`
+    const imageRes = await fetch(downloadUrl)
+    if (!imageRes.ok) {
+      console.error("[upload] download failed:", imageRes.status)
+      return null
+    }
+    const imageBuffer = await imageRes.arrayBuffer()
+
+    // 3. Upload to Vercel Blob via existing rendiciones /api/upload
+    const filename = `receipt-${Date.now()}.jpg`
+    const form = new FormData()
+    form.append("file", new Blob([imageBuffer], { type: "image/jpeg" }), filename)
+
+    const uploadRes = await fetch(`${process.env.RENDICIONES_API_URL}/api/upload`, {
+      method: "POST",
+      body: form,
+    })
+    if (!uploadRes.ok) {
+      console.error("[upload] upload endpoint failed:", uploadRes.status)
+      return null
+    }
+    const { url } = await uploadRes.json()
+    return url || null
+  } catch (err) {
+    console.error("[upload] unexpected error:", err.message)
+    return null
+  }
+}
+
+// ─────────────────────────────────────────────────────────────────────────────
 // Step helpers — ask the next question
 // ─────────────────────────────────────────────────────────────────────────────
 
@@ -244,6 +295,13 @@ async function handleReceipt(chatId, userId, userName, messageId, fileId) {
   const ocr = runOcr(fileId)
   console.log(`[flow] new receipt | user:${userId} (${userName}) | hasAmount:${!!ocr.amount} | hasCurrency:${!!ocr.currency}`)
 
+  // Upload image and send greeting in parallel — neither depends on the other
+  const [, receiptUrl] = await Promise.all([
+    sendMessage(chatId, `🧾 Got it, ${userName}! Let's register this expense.`),
+    uploadReceipt(fileId),
+  ])
+  console.log("[flow] receiptUrl:", receiptUrl ?? "upload failed, continuing without")
+
   const expense = {
     chatId,
     userId,
@@ -261,10 +319,9 @@ async function handleReceipt(chatId, userId, userName, messageId, fileId) {
     paymentMethodId:   null,
     paymentMethodName: null,
     receiptFileId:     fileId,
+    receiptUrl:        receiptUrl,
     createdAt:         new Date().toISOString(),
   }
-
-  await sendMessage(chatId, `🧾 Got it, ${userName}! Let's register this expense.`)
 
   if (!ocr.amount || !ocr.currency) {
     setSession(chatId, userId, { state: "waiting_for_amount", expense })
@@ -395,6 +452,7 @@ async function handleCallbackQuery(chatId, userId, callbackQueryId, data, sessio
           paid_by:         final.userName,
           cash_source:     final.paymentMethodName,
           expense_date:    final.date || new Date().toISOString().split("T")[0],
+          receipt_url:     final.receiptUrl || null,
         }),
       })
 
