@@ -282,8 +282,12 @@ async function handleReceipt(chatId, userId, userName, messageId, fileId) {
 async function handleText(chatId, userId, text, session) {
   const { state, expense } = session
 
+  console.log("STATE BEFORE:", state)
+
   if (state === "waiting_for_amount") {
+    console.log("[waiting_for_amount] entered, raw text:", JSON.stringify(text))
     const parsed = parseAmount(text)
+    console.log("[waiting_for_amount] parsed:", parsed)
     if (!parsed) {
       await sendMessage(
         chatId,
@@ -295,6 +299,7 @@ async function handleText(chatId, userId, text, session) {
     expense.amount   = parsed.amount
     expense.currency = parsed.currency
     setSession(chatId, userId, { state: "waiting_for_project", expense })
+    console.log("[waiting_for_amount] state updated to: waiting_for_project")
     await askForProject(chatId)
     return
   }
@@ -456,7 +461,9 @@ export default async function handler(req, res) {
 
       // Text message
       } else if (msg.text) {
+        console.log("MESSAGE:", msg.text)
         const session = getSession(chatId, userId)
+        console.log("SESSION:", session ? `state=${session.state}` : "null")
         if (session) {
           await handleText(chatId, userId, msg.text, session)
         }
