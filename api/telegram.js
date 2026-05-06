@@ -169,46 +169,54 @@ function runOcr(/* fileId */) {
 // ─────────────────────────────────────────────────────────────────────────────
 
 async function uploadReceipt(fileId) {
+  console.log("Uploading receipt, fileId:", fileId)
   try {
     // 1. Resolve Telegram file path
     const fileRes = await fetch(tgUrl(`getFile?file_id=${encodeURIComponent(fileId)}`))
     if (!fileRes.ok) {
-      console.error("[upload] getFile failed:", fileRes.status)
+      console.error("RECEIPT UPLOAD FAILED: getFile returned HTTP", fileRes.status)
       return null
     }
     const fileData = await fileRes.json()
     if (!fileData.ok || !fileData.result?.file_path) {
-      console.error("[upload] getFile: missing file_path")
+      console.error("RECEIPT UPLOAD FAILED: missing file_path —", JSON.stringify(fileData))
       return null
     }
+    console.log("Telegram file_path:", fileData.result.file_path)
 
-    // 2. Download from Telegram (token stays out of logs)
+    // 2. Download image buffer from Telegram (token kept out of logs)
     const token = process.env.TELEGRAM_BOT_TOKEN
     const downloadUrl = `https://api.telegram.org/file/bot${token}/${fileData.result.file_path}`
     const imageRes = await fetch(downloadUrl)
     if (!imageRes.ok) {
-      console.error("[upload] download failed:", imageRes.status)
+      console.error("RECEIPT UPLOAD FAILED: image download returned HTTP", imageRes.status)
       return null
     }
     const imageBuffer = await imageRes.arrayBuffer()
+    console.log("Downloaded image size:", imageBuffer.byteLength, "bytes")
 
-    // 3. Upload to Vercel Blob via existing rendiciones /api/upload
+    // 3. Upload to Vercel Blob via rendiciones /api/upload
+    const uploadUrl = `${process.env.RENDICIONES_API_URL}/api/upload`
+    console.log("Uploading to /api/upload:", uploadUrl)
     const filename = `receipt-${Date.now()}.jpg`
     const form = new FormData()
     form.append("file", new Blob([imageBuffer], { type: "image/jpeg" }), filename)
 
-    const uploadRes = await fetch(`${process.env.RENDICIONES_API_URL}/api/upload`, {
+    const uploadRes = await fetch(uploadUrl, {
       method: "POST",
       body: form,
     })
+    const rawBody = await uploadRes.text()
+    console.log("Upload response:", uploadRes.status, rawBody)
+
     if (!uploadRes.ok) {
-      console.error("[upload] upload endpoint failed:", uploadRes.status)
+      console.error("RECEIPT UPLOAD FAILED: /api/upload returned HTTP", uploadRes.status, rawBody)
       return null
     }
-    const { url } = await uploadRes.json()
-    return url || null
+    const result = JSON.parse(rawBody)
+    return result.url || null
   } catch (err) {
-    console.error("[upload] unexpected error:", err.message)
+    console.error("RECEIPT UPLOAD FAILED:", err.message)
     return null
   }
 }
@@ -300,7 +308,11 @@ async function handleReceipt(chatId, userId, userName, messageId, fileId) {
     sendMessage(chatId, `🧾 Got it, ${userName}! Let's register this expense.`),
     uploadReceipt(fileId),
   ])
-  console.log("[flow] receiptUrl:", receiptUrl ?? "upload failed, continuing without")
+
+  if (receiptUrl === null) {
+    await sendMessage(chatId, "⚠️ Receipt upload failed. The expense will be saved without the image.")
+  }
+  console.log("[flow] receiptUrl:", receiptUrl ?? "null (upload failed)")
 
   const expense = {
     chatId,
